@@ -1,0 +1,14 @@
+[Unit]
+Description=Board voice-note ASR watcher (SenseVoice local transcribe -> board-transcripts.txt)
+After=network.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+# asr_watch.py derives the workspace from its own path, so only this line needs adjusting.
+ExecStart=/usr/bin/python3 /home/<user>/workspace/tools/asr_watch.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
