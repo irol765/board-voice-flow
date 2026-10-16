@@ -25,7 +25,32 @@ systemd/asr-watch.service Boot-time units for both processes
 LICENSE                   MIT (code and skill text)
 ```
 
-## Quick start
+## Fastest path: hand it to your Muse
+
+Copy one block, paste it to your own Muse, and it deploys everything and
+verifies the install for you:
+
+```text
+Please set up the board-voice-flow local transcription pipeline for me. The repo is https://github.com/irol765/board-voice-flow — follow its README and SKILL.md:
+1. Install SKILL.md and skill.yaml as the skill board_voice_flow in my custom-skills folder, and deploy the two scripts and systemd units from the repo.
+2. Download the SenseVoice-Small int8 model (link in the README, ~230 MB) and create the venv with sherpa-onnx.
+3. Enable both services (asr-server, asr-watch) at boot, then verify with one existing voice_note wav: its line must appear in board-transcripts.txt within a few seconds.
+4. From then on, handle my board voice notes by the SKILL.md flow: read the platform transcript, compare with the local transcript file, and trust the local one.
+Adapt paths to this machine, and report the verification result when done.
+```
+
+中文版（复制这一段发给你的 Muse 即可）：
+
+```text
+请帮我装 board-voice-flow 本地语音转写流水线，仓库：https://github.com/irol765/board-voice-flow ，照它的 README 和 SKILL.md 做：
+1. 把 SKILL.md 和 skill.yaml 装进我的 custom-skills（技能名 board_voice_flow），脚本和 systemd 服务模板照仓库部署；
+2. 下载 SenseVoice-Small int8 模型（README 里有链接，约 230MB），建 venv 装好 sherpa-onnx；
+3. 把 asr-server 和 asr-watch 两个服务设成开机自启，再用一条现成的 voice_note 语音验收：转写稿几秒内要出现在 board-transcripts.txt 里；
+4. 以后处理我的板子语音按 SKILL.md 流程：先看平台转写、再对本地准稿，以本地准稿为准。
+路径按我这台机器的实际调整，装完把验收结果告诉我。
+```
+
+## Quick start (manual)
 
 1. Download the model (SenseVoice-Small int8 for sherpa-onnx, ~230 MB) — the
    weights are **not** in this repo:
