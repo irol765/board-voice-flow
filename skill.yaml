@@ -1,0 +1,5 @@
+name: "board_voice_flow"
+title: "Board Voice Pipeline"
+description: "Auto-transcribe voice notes from a small voice terminal with a local ASR service, keep the transcripts in one log file, and reply using a compare-first flow with short board answers and full results in the main chat."
+category: "Work and knowledge"
+include_in_prompt: false
