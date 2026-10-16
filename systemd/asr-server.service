@@ -1,0 +1,14 @@
+[Unit]
+Description=SenseVoice local ASR server (board voice transcription)
+After=network.target
+
+[Service]
+Type=simple
+# Adjust HOME and paths to the installing user's workspace.
+Environment=HOME=/home/<user>
+ExecStart=/home/<user>/workspace/tools/asr-sv-venv/bin/python /home/<user>/workspace/tools/asr_server_sv.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
