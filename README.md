@@ -68,6 +68,14 @@ LICENSE                   MIT (code and skill text)
 - Watcher is stdlib-only Python; the ASR service uses only the standard
   library HTTP stack plus sherpa-onnx
 
+## Where this comes from
+
+This pipeline was built for — and battle-tested on — the
+[Mu酱 / Muchan](https://musejiang.com) voice-terminal gadget, a small
+ESP32-S3 AMOLED device that talks to Muse through a custom relay channel.
+If you are here because your gadget's voice input keeps coming back garbled,
+the Mu酱 site is also where the flashing tool and firmware live.
+
 ## Credits and licenses
 
 - Code and skill text in this repo: MIT (see `LICENSE`).
