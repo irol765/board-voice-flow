@@ -108,7 +108,9 @@ means transcripts stop, with nothing visibly broken. A plain bash guard
 it checks both units (present, enabled, active — restoring a vanished unit
 file from the kept copies), probes `/health` (one restart, then re-check),
 and checks transcript freshness (an untranscribed note older than 240 s
-restarts the watcher). It prints one line — `OK`, `RECOVERED` or `ALERT` —
+restarts the watcher), plus the unresolved-failures flag the watcher keeps
+for notes its automatic retry could not recover. It prints one line —
+`OK`, `RECOVERED` or `ALERT` —
 and a zero-token poller (`scripts/guard_watch.sh`) logs the line and only
 escalates an `ALERT` (the guard could not fix it) to the agent, once per
 distinct alert and at most hourly. No LLM patrols the healthy path; see
@@ -131,6 +133,12 @@ the Mu酱 site is also where the flashing tool and firmware live.
 
 ## Versions
 
+- **1.1.1 (2026-10-22)** — race fix: the watcher now waits for `/health`
+  before transcribing after a (re)start and defers notes while the service
+  is unhealthy, instead of marking them `[FAILED]` against a still-loading
+  model. `[FAILED]` entries get one automatic retry after health recovers
+  (the line is rewritten in place on success); entries that still fail are
+  listed in `asr-failed.flag`, which the guard reports as an `ALERT`.
 - **1.1.0 (2026-10-22)** — adds the health guard layer: `scripts/asr_guard.sh`
   (unit presence + `/health` + transcript-freshness checks with
   self-recovery), `scripts/guard_watch.sh` (zero-token poller that only

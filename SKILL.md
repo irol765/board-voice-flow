@@ -22,6 +22,10 @@ Use this skill when the user talks to you through a small voice terminal (a "boa
 
 - Write a `[FAILED]` line for a note whose transcription failed, so a failure is visible in the file instead of silently missing.
 
+- Never transcribe against a still-loading model: the watcher waits for `GET /health` to answer before processing anything after a (re)start, and when a transcription fails while the service is unhealthy it defers the note instead of marking it `[FAILED]`. (The server opens its port only after the model is loaded, so health answering means the model is ready.)
+
+- Retry `[FAILED]` entries once, automatically, after health recovers: the entry's line is rewritten in place with the real transcript. The retry is recorded persistently, so restarts do not retry forever. An entry that still fails after its retry is listed in `asr-failed.flag` next to the transcripts file — the health guard turns a non-empty flag into an `ALERT` (below), so an unrecoverable note surfaces instead of staying silent.
+
 ## Setup
 
 - Prepare the model once: download the SenseVoice-Small int8 sherpa-onnx model (`model.int8.onnx` plus `tokens.txt`) into a tools directory, and create a Python venv with `sherpa-onnx` and `numpy` installed.
@@ -38,7 +42,7 @@ Use this skill when the user talks to you through a small voice terminal (a "boa
 
 - The pipeline fails silently when it fails: a dead ASR server or watcher just means new lines stop appearing in the transcripts file, and nobody notices until the user does. Guard it with a plain script on a timer — **never with an agent cron or any LLM patrol**. An agent that wakes every few minutes to read "OK" burns budget all day and still reacts slower than the script does.
 
-- The guard (`scripts/asr_guard.sh`) checks three things on every run, in this order: (1) both systemd units — the unit file is present (a vanished file, e.g. after a VM rebuild, is reinstalled from the kept copies in the tools `systemd/` directory), the unit is enabled, and the service is active, restarting one that is down; (2) the ASR server's `GET /health` — on failure it restarts `asr-server` once and re-checks; (3) transcript freshness — if the newest voice note's id is ahead of the transcripts file and that note has waited longer than 240 seconds, it restarts `asr-watch`.
+- The guard (`scripts/asr_guard.sh`) checks four things on every run, in this order: (1) both systemd units — the unit file is present (a vanished file, e.g. after a VM rebuild, is reinstalled from the kept copies in the tools `systemd/` directory), the unit is enabled, and the service is active, restarting one that is down; (2) the ASR server's `GET /health` — on failure it restarts `asr-server` once and re-checks; (3) transcript freshness — if the newest voice note's id is ahead of the transcripts file and that note has waited longer than 240 seconds, it restarts `asr-watch`; (4) the unresolved-failures flag (`asr-failed.flag`) — a non-empty flag means the watcher's automatic retry could not recover those notes, and the guard reports them as an `ALERT`.
 
 - The guard recovers what it can by itself and prints exactly one line per run: `OK`, `RECOVERED` (it fixed something), or `ALERT` (it could not), followed by details. A poller (`scripts/guard_watch.sh`, run by `systemd/asr-guard.timer` every 5 minutes) appends every line to a state log and stays silent on `OK` and `RECOVERED` — a successful self-recovery is not news.
 

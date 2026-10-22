@@ -8,10 +8,16 @@
 - 首次启动（记录文件为空）时：只补转已存在的最近 10 条，更早的存量跳过并记日志，
   避免把上百条历史灌满文件；之后新到/漏转的都转
 - 输出行格式：<编号>\t<YYYY-MM-DD HH:MM:SS>\t<转写原文>；失败为 [FAILED]
+- 竞速防护（WK-86）：启动时、以及转写失败且服务不健康时，先等 /health 返回
+  ok 再处理积压——模型加载窗口内不硬转，避免把可转的语音标成 [FAILED]
+- [FAILED] 补转（WK-86）：服务恢复健康后，已标 [FAILED] 的条目自动补转
+  一次（重试记录持久化在 .asr-failed-retry.json，重启不重复补）；补转仍
+  失败的编号写 asr-failed.flag，守护（vm-state-guard）据此报 ALERT
 日志：~/workspace/tools/asr_watch.log（轮转 1MB×3）
 """
 import glob
 import http.client
+import json
 import logging
 import logging.handlers
 import os
@@ -27,6 +33,9 @@ LOG_FILE = os.path.join(WORKSPACE, "tools/asr_watch.log")
 ASR_HOST, ASR_PORT = "127.0.0.1", 18765
 POLL_SEC = 2
 BASELINE_RECENT = 10  # 首次启动时补转的存量条数
+HEALTH_WAIT_MAX = 300  # 等 /health 的上限（秒）：模型加载远快于此
+FAILED_FLAG = os.path.join(FILES_DIR, "asr-failed.flag")
+RETRY_STATE = os.path.join(FILES_DIR, ".asr-failed-retry.json")
 
 NAME_RE = re.compile(r"^voice_note-(\d+)\.wav$")
 
@@ -79,7 +88,124 @@ def append_line(num, text):
         f.write(f"{num}\t{ts}\t{text}\n")
 
 
+def health_ok():
+    conn = http.client.HTTPConnection(ASR_HOST, ASR_PORT, timeout=3)
+    try:
+        conn.request("GET", "/health")
+        resp = conn.getresponse()
+        resp.read()
+        return resp.status == 200
+    except Exception:
+        return False
+    finally:
+        conn.close()
+
+
+def wait_health():
+    """等 ASR 服务 /health 返回 200（服务进程在模型加载完才开端口，
+    所以 health 通 = 模型可用）。返回是否等到。"""
+    t0 = time.time()
+    while time.time() - t0 < HEALTH_WAIT_MAX:
+        if health_ok():
+            return True
+        time.sleep(2)
+    return health_ok()
+
+
+def load_retry_state():
+    try:
+        with open(RETRY_STATE, encoding="utf-8") as f:
+            j = json.load(f)
+        return set(j.get("retried", [])), set(j.get("unresolved", []))
+    except Exception:
+        return set(), set()
+
+
+def save_retry_state(retried, unresolved):
+    tmp = RETRY_STATE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump({"retried": sorted(retried), "unresolved": sorted(unresolved)}, f)
+    os.replace(tmp, RETRY_STATE)
+    if unresolved:
+        with open(FAILED_FLAG, "w", encoding="utf-8") as f:
+            f.write("\n".join(str(n) for n in sorted(unresolved)) + "\n")
+    elif os.path.exists(FAILED_FLAG):
+        os.unlink(FAILED_FLAG)
+
+
+def collect_failed_ids():
+    failed = []
+    if os.path.exists(OUT_FILE):
+        with open(OUT_FILE, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                parts = line.rstrip("\n").split("\t")
+                if len(parts) >= 3 and parts[0].isdigit() and parts[2] == "[FAILED]":
+                    failed.append(int(parts[0]))
+    return failed
+
+
+def rewrite_line(num, text):
+    """把 OUT_FILE 中 num 的 [FAILED] 行原地替换为转写结果（原子重写）。"""
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with open(OUT_FILE, encoding="utf-8", errors="replace") as f:
+        lines = f.readlines()
+    out = []
+    hit = False
+    for line in lines:
+        parts = line.rstrip("\n").split("\t")
+        if len(parts) >= 3 and parts[0] == str(num) and parts[2] == "[FAILED]":
+            out.append(f"{num}\t{ts}\t{text}\n")
+            hit = True
+        else:
+            out.append(line)
+    if hit:
+        tmp = OUT_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.writelines(out)
+        os.replace(tmp, OUT_FILE)
+    return hit
+
+
+def retry_failed(retried, unresolved):
+    """[FAILED] 条目在服务健康后自动补转一次。补转仍失败进 unresolved
+    并经 asr-failed.flag 浮给守护报 ALERT，不再静默。"""
+    if not health_ok():
+        return
+    wavs = list_wavs()
+    changed = False
+    for num in collect_failed_ids():
+        if num in retried:
+            continue
+        path = wavs.get(num)
+        if path is None:
+            continue  # wav 已删，无从补转；不占重试名额
+        if not health_ok():
+            break  # 服务中途又不健康：整轮推迟，不消耗任何名额
+        retried.add(num)
+        changed = True
+        try:
+            text = transcribe(path)
+            if rewrite_line(num, text):
+                unresolved.discard(num)
+                log.info("retry %d OK -> %d chars", num, len(text))
+        except Exception as e:
+            if not health_ok():
+                # 失败源于服务掉线而非条目本身：退回名额，下轮再试
+                retried.discard(num)
+                log.warning("retry %d aborted (service unhealthy): %s", num, e)
+                break
+            unresolved.add(num)
+            log.error("retry %d FAILED again: %s (flagged for guard ALERT)", num, e)
+    if changed:
+        save_retry_state(retried, unresolved)
+
+
 def main():
+    if not wait_health():
+        log.error("ASR health not up after %ds at startup; proceeding anyway",
+                  HEALTH_WAIT_MAX)
+    retried, unresolved = load_retry_state()
+    retry_failed(retried, unresolved)
     done = load_done_ids()
     wavs = list_wavs()
     fresh_start = not done
@@ -96,6 +222,8 @@ def main():
     sizes = {}  # num -> last seen size (stability check)
     while True:
         try:
+            deferred = False
+            new_failed = False
             wavs = list_wavs()
             for num in sorted(wavs):
                 if num in done:
@@ -118,10 +246,24 @@ def main():
                     log.info("transcribed %d (%d bytes wav) -> %d chars",
                              num, size, len(text))
                 except Exception as e:
+                    if not health_ok():
+                        # 服务不健康（多半在加载模型）：不标 FAILED、不占
+                        # done，等健康恢复后自然重转本条与积压。
+                        log.warning("transcribe %d deferred (service unhealthy): %s",
+                                    num, e)
+                        deferred = True
+                        break
                     append_line(num, "[FAILED]")
                     log.error("transcribe %d FAILED: %s", num, e)
+                    new_failed = True
                 done.add(num)
                 sizes.pop(num, None)
+            if deferred:
+                wait_health()
+                retry_failed(retried, unresolved)
+                done = load_done_ids()
+            elif new_failed:
+                retry_failed(retried, unresolved)
             # 清理已消失文件的 size 记录
             for num in list(sizes):
                 if num not in wavs:

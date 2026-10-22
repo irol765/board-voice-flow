@@ -84,5 +84,14 @@ if [ -n "${MAXWAV:-}" ] && [ -n "${MAXTR:-}" ] && [ "$MAXWAV" -gt "$MAXTR" ]; th
   fi
 fi
 
+# --- 4) unresolved [FAILED] retries ------------------------------------
+# The watcher retries every [FAILED] entry once after health recovers;
+# entries that still fail are listed in $FILES_DIR/asr-failed.flag (one
+# id per line). A non-empty flag is an ALERT: a silent loss must surface.
+FAILED_FLAG="$FILES_DIR/asr-failed.flag"
+if [ -s "$FAILED_FLAG" ]; then
+  mark_alert "asr-failed-unresolved:$(paste -sd, "$FAILED_FLAG" 2>/dev/null)"
+fi
+
 if [ -n "$ALERTS" ]; then STATUS="ALERT"; fi
 echo "$STATUS asr-guard$DETAILS$ALERTS"
