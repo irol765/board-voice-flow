@@ -1,0 +1,9 @@
+[Unit]
+Description=Board voice pipeline health guard (one pass)
+After=network.target
+
+[Service]
+Type=oneshot
+# Adjust HOME and paths to the installing user's workspace.
+Environment=HOME=/home/<user>
+ExecStart=/home/<user>/workspace/tools/guard_watch.sh

@@ -34,6 +34,16 @@ Use this skill when the user talks to you through a small voice terminal (a "boa
 
 - Verify the setup end to end before relying on it: `GET /health` answers ok, then copy any existing voice note to a throwaway id (for example `voice_note-9999.wav`) in the watched directory and confirm its line appears in the transcripts file within about 5 seconds with correct text. Delete the test file and its line afterwards.
 
+## Health guard (a script, not an agent)
+
+- The pipeline fails silently when it fails: a dead ASR server or watcher just means new lines stop appearing in the transcripts file, and nobody notices until the user does. Guard it with a plain script on a timer — **never with an agent cron or any LLM patrol**. An agent that wakes every few minutes to read "OK" burns budget all day and still reacts slower than the script does.
+
+- The guard (`scripts/asr_guard.sh`) checks three things on every run, in this order: (1) both systemd units — the unit file is present (a vanished file, e.g. after a VM rebuild, is reinstalled from the kept copies in the tools `systemd/` directory), the unit is enabled, and the service is active, restarting one that is down; (2) the ASR server's `GET /health` — on failure it restarts `asr-server` once and re-checks; (3) transcript freshness — if the newest voice note's id is ahead of the transcripts file and that note has waited longer than 240 seconds, it restarts `asr-watch`.
+
+- The guard recovers what it can by itself and prints exactly one line per run: `OK`, `RECOVERED` (it fixed something), or `ALERT` (it could not), followed by details. A poller (`scripts/guard_watch.sh`, run by `systemd/asr-guard.timer` every 5 minutes) appends every line to a state log and stays silent on `OK` and `RECOVERED` — a successful self-recovery is not news.
+
+- Only an `ALERT` wakes the agent: once per distinct alert, and at most once an hour while the same alert persists, through a configurable command (`ASR_GUARD_ALERT_CMD`) pointed at whatever reaches the agent. When an alert does reach you, work the Troubleshooting section below — the guard has already tried the restarts.
+
 ## Reply flow (the core behavior)
 
 - When a voice note arrives, first read the platform auto-transcript that came with the message, then read that note's line in the transcripts file. If the line is not there yet, wait a few seconds and read again — the watcher needs a moment after the file lands.
