@@ -25,7 +25,7 @@ scripts/guard_watch.sh    Zero-token poller: logs the guard's line, escalates on
 systemd/asr-server.service
 systemd/asr-watch.service Boot-time units for both processes
 systemd/asr-guard.service
-systemd/asr-guard.timer   Runs the health guard every 5 minutes
+systemd/asr-guard.timer   Runs the health guard every 5 minutes (fallback scheduler — see "Health guard")
 LICENSE                   MIT (code and skill text)
 ```
 
@@ -38,7 +38,7 @@ verifies the install for you:
 Please set up the board-voice-flow local transcription pipeline for me. The repo is https://github.com/irol765/board-voice-flow — follow its README and SKILL.md:
 1. Install SKILL.md and skill.yaml as the skill board_voice_flow in my custom-skills folder, and deploy the two scripts and systemd units from the repo.
 2. Download the SenseVoice-Small int8 model (link in the README, ~230 MB) and create the venv with sherpa-onnx.
-3. Enable both services (asr-server, asr-watch) at boot, install the health guard (scripts/asr_guard.sh, scripts/guard_watch.sh and the asr-guard systemd timer, every 5 minutes), then verify with one existing voice_note wav: its line must appear in board-transcripts.txt within a few seconds.
+3. Enable both services (asr-server, asr-watch) at boot, install the health guard (scripts/asr_guard.sh, scripts/guard_watch.sh, every 5 minutes — schedule it from a scheduler that survives this machine being replaced if you have one, such as your agent platform's own cron; the asr-guard systemd timer alone is not enough on an ephemeral VM, because a replacement wipes the timer together with the services), then verify with one existing voice_note wav: its line must appear in board-transcripts.txt within a few seconds.
 4. From then on, handle the voice-note files that arrive in my main chat by the SKILL.md flow: read the platform transcript, compare with the local transcript file, and trust the local one.
 Adapt paths to this machine, and report the verification result when done.
 ```
@@ -49,7 +49,7 @@ Adapt paths to this machine, and report the verification result when done.
 请帮我装 board-voice-flow 本地语音转写流水线，仓库：https://github.com/irol765/board-voice-flow ，照它的 README 和 SKILL.md 做：
 1. 把 SKILL.md 和 skill.yaml 装进我的 custom-skills（技能名 board_voice_flow），脚本和 systemd 服务模板照仓库部署；
 2. 下载 SenseVoice-Small int8 模型（README 里有链接，约 230MB），建 venv 装好 sherpa-onnx；
-3. 把 asr-server 和 asr-watch 两个服务设成开机自启，并装上健康守护（scripts/asr_guard.sh、scripts/guard_watch.sh 与 asr-guard systemd 定时器，每 5 分钟一轮），再用一条现成的 voice_note 语音验收：转写稿几秒内要出现在 board-transcripts.txt 里；
+3. 把 asr-server 和 asr-watch 两个服务设成开机自启，并装上健康守护（scripts/asr_guard.sh、scripts/guard_watch.sh，每 5 分钟一轮——若有能熬过整机更换的调度器，例如你的智能体平台自带的定时任务，用它来跑守护；asr-guard systemd 定时器只能作兜底，因为虚拟机一换，定时器会和服务一起被清掉），再用一条现成的 voice_note 语音验收：转写稿几秒内要出现在 board-transcripts.txt 里；
 4. 以后处理主聊里收到的语音文件（voice_note）按 SKILL.md 流程：先看平台转写、再对本地准稿，以本地准稿为准。
 路径按我这台机器的实际调整，装完把验收结果告诉我。
 ```
@@ -91,6 +91,16 @@ Adapt paths to this machine, and report the verification result when done.
    systemctl enable --now asr-guard.timer
    ```
 
+   That timer is the fallback, not the finish line: it lives in the same
+   system directories a VM replacement wipes, so on an ephemeral host it
+   dies together with the services it guards. Whenever a scheduler that
+   survives the host exists (the agent platform's own cron, a supervisor
+   outside the VM), run `scripts/guard_watch.sh` from there instead, keep
+   persistent copies of every unit file plus a manifest of what was
+   installed, and make sure only one guardian owns recovery — if the
+   deployment already has one, register these units with it rather than
+   adding this timer as a second one.
+
 4. Copy one existing voice note to a test id (e.g. `voice_note-9999.wav`) in
    the watched folder and confirm its line shows up in `board-transcripts.txt`
    within a few seconds. Delete the test file and line afterwards.
@@ -116,6 +126,15 @@ escalates an `ALERT` (the guard could not fix it) to the agent, once per
 distinct alert and at most hourly. No LLM patrols the healthy path; see
 SKILL.md, "Health guard", for the full contract.
 
+One rule outranks the mechanics: **the guard has to survive the failure it
+guards against.** A guard scheduled only by a systemd timer is exactly as
+ephemeral as the services it watches — replace the VM and both are gone,
+with nothing left to notice, let alone recover. Persistent copies and a
+manifest of everything installed into system directories, a schedule that
+lives outside the wiped directories, and exactly one guardian per
+deployment: that is the difference between a pipeline that heals itself and
+one that waits for a human to notice the silence.
+
 ## Measured on the reference setup
 
 - 2 vCPU / 8 GB VM, model loaded once, transcription serialized by a lock
@@ -133,6 +152,15 @@ the Mu酱 site is also where the flashing tool and firmware live.
 
 ## Versions
 
+- **1.2.0 (2026-10-23)** — the guard learns to survive its own host:
+  scheduling guidance rewritten so the health guard is run from a
+  scheduler that survives a VM/host replacement (the systemd timer is
+  demoted to fallback for persistent hosts), persistent copies plus a
+  written manifest of system-directory installs become part of setup,
+  and a one-guardian-per-deployment rule is added (register with an
+  existing recovery mechanism instead of installing a second one).
+  No changes to the transcription core, the guard script's checks, or
+  the reply flow.
 - **1.1.1 (2026-10-22)** — race fix: the watcher now waits for `/health`
   before transcribing after a (re)start and defers notes while the service
   is unhealthy, instead of marking them `[FAILED]` against a still-loading
