@@ -46,6 +46,10 @@ Use this skill when the user talks to you through a small voice terminal (a "boa
 
 - The guard recovers what it can by itself and prints exactly one line per run: `OK`, `RECOVERED` (it fixed something), or `ALERT` (it could not), followed by details. A poller (`scripts/guard_watch.sh`, run by `systemd/asr-guard.timer` every 5 minutes) appends every line to a state log and stays silent on `OK` and `RECOVERED` — a successful self-recovery is not news.
 
+- **The guard must outlive the failure it guards against.** The systemd timer that schedules the guard lives in the same system directories a host or VM replacement wipes — so on an ephemeral host, one replacement takes the services, the guard and its timer in a single blow, and nothing is left to restore any of it; the pipeline then stays dead until a human notices the silence. Design against that from the start: (1) keep a persistent copy of every file you install into system directories, outside those directories, plus a short written manifest of what was installed; (2) schedule the guard from somewhere that survives the host being replaced whenever such a scheduler exists — the agent platform's own scheduler, a supervisor outside the VM, any clock that is not stored in the wiped directories — and treat the systemd timer as the fallback for hosts that persist, not as the mechanism of record on ephemeral ones; (3) after any host replacement, check the guard's own survival before checking the pipeline.
+
+- **One guardian per deployment.** Before installing this guard, look for a recovery mechanism the deployment already has — a platform watchdog, a manifest-driven guardian, an existing scheduler entry that restores system files. If one exists, register these units and their persistent copies with it instead of installing a second guardian; two guardians restoring the same services will fight, and the second one usually hides the first one's alerts.
+
 - Only an `ALERT` wakes the agent: once per distinct alert, and at most once an hour while the same alert persists, through a configurable command (`ASR_GUARD_ALERT_CMD`) pointed at whatever reaches the agent. When an alert does reach you, work the Troubleshooting section below — the guard has already tried the restarts.
 
 ## Reply flow (the core behavior)
@@ -77,3 +81,5 @@ Use this skill when the user talks to you through a small voice terminal (a "boa
 - If the transcripts file stops growing while voice notes keep arriving, check the watcher log next to the script (`asr_watch.log`) and confirm the watcher service is active.
 
 - Remember the timestamps in the transcripts file are the VM's system time, which may be UTC while the user is in another timezone. Note ids, not timestamps, are the reliable ordering.
+
+- If everything is gone at once — both units, the guard and its schedule — the host was most likely replaced, and the guard had been scheduled only from inside the wiped directories. Restore the units from the persistent copies, re-establish the guard's schedule first, and move that schedule somewhere that survives the host (see Health guard) before calling it fixed, or the same silence repeats at the next replacement.
