@@ -122,6 +122,21 @@ def load_retry_state():
 
 
 def save_retry_state(retried, unresolved):
+    # Disk is the source of truth for retry state: an automatic save must
+    # never drop an unresolved entry that is on disk and still [FAILED]
+    # (a restart or a second process holding stale in-memory state would
+    # otherwise overwrite it). An entry leaves the unresolved set on its
+    # own only when its transcript line is no longer [FAILED]. Manual
+    # handling edits the state file directly; retry_failed re-reads the
+    # disk every round, so manual edits are honored, never resurrected.
+    try:
+        _, disk_unresolved = load_retry_state()
+    except Exception:
+        disk_unresolved = set()
+    merged = set(unresolved) | set(disk_unresolved)
+    if os.path.exists(OUT_FILE):
+        merged &= set(collect_failed_ids())
+    unresolved = merged
     tmp = RETRY_STATE + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump({"retried": sorted(retried), "unresolved": sorted(unresolved)}, f)
@@ -171,6 +186,12 @@ def retry_failed(retried, unresolved):
     并经 asr-failed.flag 浮给守护报 ALERT，不再静默。"""
     if not health_ok():
         return
+    # Every round starts from the on-disk state (refreshed in place, so
+    # callers' set references stay valid): a manual fix or another
+    # process's update is never overwritten by this process's stale copy.
+    disk_retried, disk_unresolved = load_retry_state()
+    retried.clear(); retried.update(disk_retried)
+    unresolved.clear(); unresolved.update(disk_unresolved)
     wavs = list_wavs()
     changed = False
     for num in collect_failed_ids():

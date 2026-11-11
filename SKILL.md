@@ -26,9 +26,23 @@ Use this skill when the user talks to you through a small voice terminal (a "boa
 
 - Retry `[FAILED]` entries once, automatically, after health recovers: the entry's line is rewritten in place with the real transcript. The retry is recorded persistently, so restarts do not retry forever. An entry that still fails after its retry is listed in `asr-failed.flag` next to the transcripts file — the health guard turns a non-empty flag into an `ALERT` (below), so an unrecoverable note surfaces instead of staying silent.
 
+### Dual engine (recommended)
+
+- Run both models in one process (`scripts/asr_server_dual.py`, a drop-in replacement for `asr_server_sv.py` with the identical HTTP contract): a sherpa-onnx zipformer transducer (zh-en) as the primary and SenseVoice as the fallback. The watcher does not change.
+
+- Why not just swap models: the transducer is measurably more accurate on real traffic — in a three-day shadow run against the production engine on 150 real notes, it won the decisive subset 28 to 15 with about 21% fewer character errors — but it has hard failure modes SenseVoice does not: it crashed outright on 2 of those 150 clips and returned empty text on some very short ones. A clean swap turns those into `[FAILED]` notes. Keeping the old engine as the fallback deletes that failure mode while keeping the accuracy win.
+
+- Fallback triggers, each counted in `/health` and optionally JSON-logged (`ASR_FALLBACK_LOG`): the primary raised an exception (crash), returned empty text (empty), or exceeded the decode timeout (timeout, default 20 s). On any trigger the same audio is decoded by SenseVoice and its text returned. If the fallback itself raises, the request fails with a 500, exactly like the single-engine server.
+
+- Evaluate before you switch, the same way: shadow-run the candidate against your current engine on your own recent notes for a few days, adjudicate the differences, and look at the failure census, not just the accuracy win. Switch only on a decisive win, and keep the previous engine as the fallback rather than retiring it.
+
+- Rollback is one step: point the service back at `asr_server_sv.py`.
+
 ## Setup
 
 - Prepare the model once: download the SenseVoice-Small int8 sherpa-onnx model (`model.int8.onnx` plus `tokens.txt`) into a tools directory, and create a Python venv with `sherpa-onnx` and `numpy` installed.
+
+- For the dual engine (recommended): also download a sherpa-onnx zipformer transducer model (zh-en) and install `ffmpeg` (the dual server normalizes every clip with it — the accuracy numbers above were measured with that pass in the loop). Point the `asr-server` unit's `ExecStart` at `scripts/asr_server_dual.py` instead, with `ASR_XASR_MODEL_DIR` and `ASR_SV_MODEL_DIR` naming the two model directories, and confirm `GET /health` answers `model=dual` after a restart.
 
 - Copy `scripts/asr_server_sv.py` and `scripts/asr_watch.py` into the workspace tools directory and adjust the paths at the top of each script to the local layout. The watcher derives the workspace from its own file location; the server resolves the model directory from the user's home.
 
@@ -52,9 +66,23 @@ Use this skill when the user talks to you through a small voice terminal (a "boa
 
 - Only an `ALERT` wakes the agent: once per distinct alert, and at most once an hour while the same alert persists, through a configurable command (`ASR_GUARD_ALERT_CMD`) pointed at whatever reaches the agent. When an alert does reach you, work the Troubleshooting section below — the guard has already tried the restarts.
 
+## Transcript gate (a pusher, not the agent's memory)
+
+- Do not rely on the agent remembering to check the transcripts file before answering. Under conversational pressure the agent *will* answer from the platform's garbled transcript — this failure recurred until it was mechanized away. Deliver the transcript to the agent instead: a tiny local script (`scripts/voice_gate.py`) compares the landed audio files, the transcripts file, and a delivered-set state file, and a fast hook or cron (every ~5 seconds) runs it in `deliver` mode so each new transcript line is pushed to the agent's attention within seconds, exactly once. The first run baselines silently — it marks everything already transcribed as delivered and never floods history.
+
+- Cadence is the mechanism's working part: a 60-second push interval was too slow (replies were composed before the transcript arrived), 5 seconds holds. The gate also watches the reverse gap: an audio file older than a grace window (180 s in the reference script) with no transcript raises a pipeline alert instead of another silence.
+
+- A trailing transcripts line without its newline may be mid-append by the watcher; the gate never treats a partial line as a complete transcript.
+
+- The gate guarantees the agent *has* the accurate transcript in hand. What the agent must then do with the wait is the first rule of the Reply flow below.
+
 ## Reply flow (the core behavior)
 
-- When a voice note arrives, first read the platform auto-transcript that came with the message, then read that note's line in the transcripts file. If the line is not there yet, wait a few seconds and read again — the watcher needs a moment after the file lands.
+- **Hold the turn.** When a voice note arrives and its local transcript is not in hand yet, do not end the turn — no empty completion, and no "one moment" placeholder either. Poll the transcripts file *inside the turn* (bounded: about 90 seconds at the outside), then answer substantively in that same turn. Why this is a hard rule: a turn-based voice terminal consumes whatever completes the turn as the round's answer. An empty or placeholder completion makes the device play its "didn't hear you" fallback and close the round — and the substantive reply, sent afterwards as a new turn, can no longer be delivered into the closed round. The user hears "didn't hear you" for a perfectly audible note, then gets the real answer one round late, attached to the next note, or never. This presents exactly like an ASR or network failure and is neither.
+
+- This hold rule governs waiting *to understand* (seconds, transcript in flight). It does not repeal the headline rule below, which governs waiting *for work* (you know the request; the work is slow): headline immediately, full result on the channel the user reads. Know which wait you are in.
+
+- When the transcript is in hand, read the platform auto-transcript that came with the message, compare, and proceed as below.
 
 - When the two transcripts disagree, trust the local one. The platform transcript is known to produce garbled text and wrong-language output on short or quiet recordings.
 
@@ -77,6 +105,10 @@ Use this skill when the user talks to you through a small voice terminal (a "boa
 ## Troubleshooting
 
 - If new lines in the transcripts file read `[FAILED]`, check the ASR server first: `curl http://127.0.0.1:18765/health`. If it does not answer, restart it with `systemctl restart asr-server` and confirm the watcher (`asr-watch`) is active too.
+
+- If the board keeps answering "didn't hear you", or the user reports answers arriving one round behind, while transcripts are landing fine — check the agent's own turn behavior before the pipeline: an empty or placeholder turn sent while waiting for the transcript closes the device's round (see the hold rule under Reply flow). Neither the ASR nor the network is involved.
+
+- If `/health` on the dual-engine server shows the `fallback_*` counters climbing as a share of requests, transcripts are still correct (the fallback is carrying them), but the primary is struggling on the current traffic — changed accents, clip lengths, or a bad model file. Investigate at leisure; treat a sudden climb as an early warning, not an outage.
 
 - If the transcripts file stops growing while voice notes keep arriving, check the watcher log next to the script (`asr_watch.log`) and confirm the watcher service is active.
 
